@@ -1,9 +1,9 @@
 fastapi
 uvicorn
 pydantic
-osmnx
-networkx
 geopy
 python-dotenv
-shapely
 requests
+osmnx==1.9.4
+networkx
+shapely
