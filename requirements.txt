@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+pydantic
+osmnx
+networkx
+geopy
+python-dotenv
+shapely
