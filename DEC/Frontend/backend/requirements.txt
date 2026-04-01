@@ -4,6 +4,6 @@ pydantic
 geopy
 python-dotenv
 requests
-osmnx==1.9.4
+osmnx==2.0.1
 networkx
 shapely
