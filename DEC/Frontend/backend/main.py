@@ -5,11 +5,8 @@ from typing import Optional, List
 import json
 import os
 
-# ── Create the FastAPI app ─────────────────────────────────────────────────
-# THIS LINE must exist and must not have any import errors above it
 app = FastAPI(title="Dynamic Evacuation Cloud API")
 
-# ── Allow React frontend to call this API ──────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,101 +14,111 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Safe zones (hardcoded for now — replace with DB later) ─────────────────
 SAFE_ZONES = [
-    {"name": "Golconda Grounds",   "lat": 17.3833, "lng": 78.4011},
-    {"name": "Parade Grounds",     "lat": 17.4360, "lng": 78.5012},
-    {"name": "HICC Grounds",       "lat": 17.4278, "lng": 78.3860},
-    {"name": "Nizam Institute",    "lat": 17.4239, "lng": 78.4484},
-    {"name": "Gandhi Hospital",    "lat": 17.4440, "lng": 78.4932},
+    {"name": "Golconda Grounds",  "lat": 17.3833, "lng": 78.4011},
+    {"name": "Parade Grounds",    "lat": 17.4360, "lng": 78.5012},
+    {"name": "HICC Grounds",      "lat": 17.4278, "lng": 78.3860},
+    {"name": "Nizam Institute",   "lat": 17.4239, "lng": 78.4484},
+    {"name": "Gandhi Hospital",   "lat": 17.4440, "lng": 78.4932},
 ]
 
-# ── WebSocket connections list ──────────────────────────────────────────────
 ws_clients: List[WebSocket] = []
-
-# ── Router object (loaded on startup) ──────────────────────────────────────
 router = None
 
+GRAPH_FILE_ID = "1ntl1z5aVAZ6JIWIM4zz6kNwA4n06pgBF"
+GRAPH_PATH    = "data/hyderabad_weighted.graphml"
 
-# ── Startup: load the graph file ───────────────────────────────────────────
+
+def download_graph():
+    """Download graph from Google Drive if not already present."""
+    if os.path.exists(GRAPH_PATH):
+        print("Graph file already exists — skipping download.")
+        return True
+
+    os.makedirs("data", exist_ok=True)
+    print("Downloading graph from Google Drive...")
+
+    try:
+        import requests
+        # Step 1: get the download URL (handles large file confirmation)
+        session  = requests.Session()
+        url      = f"https://drive.google.com/uc?export=download&id={GRAPH_FILE_ID}"
+        response = session.get(url, stream=True)
+
+        # Step 2: handle Google's virus-scan warning for large files
+        token = None
+        for key, value in response.cookies.items():
+            if key.startswith("download_warning"):
+                token = value
+                break
+
+        if token:
+            url      = f"https://drive.google.com/uc?export=download&id={GRAPH_FILE_ID}&confirm={token}"
+            response = session.get(url, stream=True)
+
+        # Step 3: save the file
+        with open(GRAPH_PATH, "wb") as f:
+            for chunk in response.iter_content(chunk_size=32768):
+                if chunk:
+                    f.write(chunk)
+
+        size_mb = os.path.getsize(GRAPH_PATH) / (1024 * 1024)
+        print(f"Downloaded! File size: {size_mb:.1f} MB")
+        return True
+
+    except Exception as e:
+        print(f"ERROR downloading graph: {e}")
+        return False
+
+
 @app.on_event("startup")
 async def startup():
     global router
-    graph_path = os.path.join(os.path.dirname(__file__), "data", "hyderabad_weighted.graphml")
-
-    if os.path.exists(graph_path):
+    success = download_graph()
+    if success and os.path.exists(GRAPH_PATH):
         try:
-            # Only import osmnx if the file actually exists
             import osmnx as ox
             from routing.dijkstra import EvacuationRouter
-            router = EvacuationRouter(graph_path)
-            print("Graph loaded successfully!")
-        except ImportError as e:
-            print(f"WARNING: Could not import routing library: {e}")
-            print("Run:  pip install osmnx networkx geopy")
+            router = EvacuationRouter(GRAPH_PATH)
+            print("Router ready!")
         except Exception as e:
-            print(f"WARNING: Graph failed to load: {e}")
+            print(f"WARNING: Could not load router: {e}")
     else:
-        print(f"WARNING: Graph file not found at: {graph_path}")
-        print("API will start but /api/route will return an error until graph is loaded.")
+        print("WARNING: Graph not available. /api/route will return error.")
 
 
-# ── Request model ───────────────────────────────────────────────────────────
 class RouteRequest(BaseModel):
     origin_lat: float
     origin_lng: float
-    algorithm: Optional[str] = "dijkstra"
+    algorithm:  Optional[str] = "dijkstra"
 
 
-# ── Health check endpoint ───────────────────────────────────────────────────
 @app.get("/api/health")
 async def health():
-    return {
-        "status": "ok",
-        "graph_loaded": router is not None,
-    }
+    return {"status": "ok", "graph_loaded": router is not None}
 
 
-# ── Main route endpoint ─────────────────────────────────────────────────────
 @app.post("/api/route")
 async def get_route(req: RouteRequest):
     if router is None:
-        # Return a helpful error instead of crashing
-        return {
-            "error": "Graph not loaded yet.",
-            "fix": "Download hyderabad_weighted.graphml from Google Colab and place it in backend/data/",
-            "offline": True,
-        }
-
+        return {"error": "Graph not loaded yet. Try again in 2 minutes."}
     result = router.find_route(
-        req.origin_lat,
-        req.origin_lng,
-        SAFE_ZONES,
-        req.algorithm,
+        req.origin_lat, req.origin_lng, SAFE_ZONES, req.algorithm
     )
     return result
 
 
-# ── Safe zones list ─────────────────────────────────────────────────────────
 @app.get("/api/safe-zones")
 async def get_safe_zones():
     return {"safe_zones": SAFE_ZONES}
 
 
-# ── WebSocket for live hazard updates ──────────────────────────────────────
 @app.websocket("/ws/updates")
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
     ws_clients.append(ws)
     try:
         while True:
-            await ws.receive_text()  # keep-alive ping
+            await ws.receive_text()
     except WebSocketDisconnect:
         ws_clients.remove(ws)
-
-
-# ── Broadcast hazard to all open browser tabs ───────────────────────────────
-async def broadcast_hazard(hazard: dict):
-    msg = json.dumps({"type": "HAZARD_UPDATE", "data": hazard})
-    for ws in ws_clients:
-        await ws.send_text(msg)
